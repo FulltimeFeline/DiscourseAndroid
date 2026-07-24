@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Share-sheet exports (MediaExport.temporaryFileUri). -->
+<paths>
+    <cache-path name="shared" path="shared/" />
+    <!-- Downloaded release APKs handed to the package installer. -->
+    <cache-path name="updates" path="updates/" />
+</paths>

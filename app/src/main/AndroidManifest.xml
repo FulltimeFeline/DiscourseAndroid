@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- In-app updater: install the APK downloaded from the GitHub release. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Composer "Share Location": requested at runtime before shareCurrentLocation(). -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Element Call: the embedded WebView captures camera/mic itself. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Live-call foreground service: Android 12+ would otherwise cut
+         mic/camera capture and freeze the process when the app backgrounds,
+         dropping the MatrixRTC delayed-leave heartbeat. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <application
+        android:name=".app.DiscourseApplication"
+        android:label="Discourse"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/Theme.Discourse"
+        android:supportsRtl="true">
+
+        <!-- singleTask: the OAuth/SSO redirect from the Custom Tab must re-enter
+             THIS instance (onNewIntent) instead of stacking a second one, or the
+             pending browser-auth continuation would never resolve. -->
+        <activity
+            android:name=".app.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- OAuth/SSO callback scheme (see PendingLogin.callbackScheme). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.riiiiiiiley.discourse" />
+            </intent-filter>
+        </activity>
+
+        <!-- Media share sheet: exports downloaded media as content:// URIs. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Notification actions (reply / mark as read) from local notifications. -->
+        <receiver
+            android:name=".core.NotificationActionReceiver"
+            android:exported="false" />
+
+        <!-- Keeps mic/camera capture and the MatrixRTC heartbeat alive while a
+             call is backgrounded (the analogue of the iOS `audio` background
+             mode + WebKit's held capture session). -->
+        <service
+            android:name=".features.call.CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera|mediaPlayback" />
+    </application>
+</manifest>

@@ -1,0 +1,10 @@
+<resources>
+    <!-- Pre-Compose window chrome: dark launch backdrop so cold start reads as
+         an already-open app filling in, matching the iOS LaunchBackdrop. -->
+    <style name="Theme.Discourse" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/launch_backdrop</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
