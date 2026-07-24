@@ -25,3 +25,6 @@ keystore.properties
 
 # OS
 .DS_Store
+
+# Firebase config (contains project API key)
+google-services.json

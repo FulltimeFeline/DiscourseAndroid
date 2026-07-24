@@ -205,6 +205,9 @@ class AppState(context: Context) {
 
     /** Warm sessions, kept across account switches. Keyed by user ID. */
     private val scopes = mutableMapOf<String, SessionScope>()
+
+    /** Every warm session (active + background), for multi-account push. */
+    val warmScopes: List<SessionScope> get() = scopes.values.toList()
     private var reconnectJob: Job? = null
 
     /**

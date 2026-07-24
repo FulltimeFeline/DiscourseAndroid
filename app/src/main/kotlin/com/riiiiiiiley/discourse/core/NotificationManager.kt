@@ -45,6 +45,39 @@ object NotificationManager {
     private var preferences: Preferences? = null
 
     /**
+     * Shows a decrypted push (from UnifiedPush / [PushRegistrar]) as a local
+     * notification, reusing the same delivery path as sync-driven ones. Skips
+     * the room currently on screen and accounts the user disabled.
+     */
+    fun showPush(
+        context: Context,
+        roomId: String,
+        eventId: String,
+        accountUserId: String,
+        title: String,
+        subtitle: String?,
+        body: String,
+        avatarUrl: String?,
+        noisy: Boolean,
+    ) {
+        if (appContext == null) appContext = context.applicationContext
+        // Cold FCM process: activate() never ran, so make sure the channels exist.
+        ensureChannels(context)
+        if (roomId == focusedRoomId && Platform.isAppActive) return
+        if (!notificationsEnabled(accountUserId)) return
+        deliver(
+            tag = eventId.ifBlank { roomId },
+            roomId = roomId,
+            accountUserId = accountUserId,
+            title = title,
+            subtitle = subtitle,
+            body = body,
+            avatarUrl = avatarUrl,
+            withActions = true,
+        )
+    }
+
+    /**
      * Room open in the main window; its notifications are suppressed while
      * active and its delivered banners cleared when opened.
      */
@@ -139,6 +172,15 @@ object NotificationManager {
     fun activate(context: Context, preferences: Preferences) {
         appContext = context.applicationContext
         this.preferences = preferences
+        ensureChannels(context)
+    }
+
+    /**
+     * Creates the notification channels (idempotent). Called from [activate] and
+     * from the push path, so a cold FCM process — where activate never ran —
+     * still has channels to post to. Channels persist once created.
+     */
+    fun ensureChannels(context: Context) {
         val manager = NotificationManagerCompat.from(context.applicationContext)
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_MESSAGES, "Messages", android.app.NotificationManager.IMPORTANCE_HIGH)
@@ -180,8 +222,11 @@ object NotificationManager {
         val preview = room.lastMessagePreview ?: return
         // Don't re-notify for the same message, and skip the room on screen.
         if (timestamp <= (lastNotified[room.id] ?: Long.MIN_VALUE)) return
-        if (Platform.isAppActive && focusedRoomId == room.id) {
-            // Mark handled so a later room-list refresh can't notify for it.
+        if (Platform.isAppActive) {
+            // The user is in the app, so don't post a sync banner — this also
+            // stops the catch-up sync on open from re-notifying messages that
+            // already arrived as push while the app was closed. Mark handled so
+            // a later room-list refresh can't notify for it either.
             lastNotified[room.id] = timestamp
             return
         }

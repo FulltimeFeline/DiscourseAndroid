@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.core.content.ContextCompat
 import com.riiiiiiiley.discourse.core.AccentChoice
 import com.riiiiiiiley.discourse.core.NotificationManager
+import com.riiiiiiiley.discourse.core.PushRegistrar
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -110,6 +111,16 @@ private fun RootView(appState: AppState) {
     // Restore the last session once; guarded internally so recomposition
     // (or activity recreation) can't restart it.
     LaunchedEffect(Unit) { appState.start() }
+
+    // Register for self-hosted push once a session is active (idempotent;
+    // a no-op until the ntfy distributor app is installed).
+    val pushContext = LocalContext.current
+    LaunchedEffect(phase) {
+        if (phase is AppState.Phase.Active) {
+            PushRegistrar.registerForPush(pushContext)
+            PushRegistrar.requestBatteryExemptionOnce(pushContext)
+        }
+    }
 
     // Theme follows Preferences: "System" accent = Material You, i.e. the OS
     // wallpaper palette (API 31+); any other choice seeds a brand M3 scheme

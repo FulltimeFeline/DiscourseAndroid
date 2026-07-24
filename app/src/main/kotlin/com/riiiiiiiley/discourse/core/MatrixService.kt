@@ -26,7 +26,12 @@ import org.matrix.rustcomponents.sdk.ClientException
 import org.matrix.rustcomponents.sdk.ClientSessionDelegate
 import org.matrix.rustcomponents.sdk.CreateRoomParameters
 import org.matrix.rustcomponents.sdk.JoinRule
+import org.matrix.rustcomponents.sdk.HttpPusherData
+import org.matrix.rustcomponents.sdk.NotificationProcessSetup
 import org.matrix.rustcomponents.sdk.OAuthConfiguration
+import org.matrix.rustcomponents.sdk.PushFormat
+import org.matrix.rustcomponents.sdk.PusherIdentifiers
+import org.matrix.rustcomponents.sdk.PusherKind
 import org.matrix.rustcomponents.sdk.RoomListService
 import org.matrix.rustcomponents.sdk.RoomPreset
 import org.matrix.rustcomponents.sdk.RoomVisibility
@@ -281,6 +286,47 @@ class MatrixService private constructor(
         // Called from Main-scoped callers (reconnect, retry); the FFI polls the
         // Rust runtime, so keep it off the input thread.
         withContext(Dispatchers.IO) { runCatching { client.enableAllSendQueues(enable = true) } }
+    }
+
+    /**
+     * Registers (or updates) the HTTP pusher pointing at the UnifiedPush
+     * endpoint through the Matrix push gateway. `event_id_only` so the gateway
+     * carries no plaintext — the event is fetched and decrypted on the device.
+     */
+    suspend fun setPushGatewayPusher(
+        pushkey: String,
+        gatewayUrl: String,
+        deviceDisplayName: String,
+    ) = withContext(Dispatchers.IO) {
+        client.setPusher(
+            identifiers = PusherIdentifiers(pushkey = pushkey, appId = PushRegistrar.APP_ID),
+            kind = PusherKind.Http(
+                HttpPusherData(
+                    url = gatewayUrl,
+                    format = PushFormat.EVENT_ID_ONLY,
+                    defaultPayload = "{}",
+                ),
+            ),
+            appDisplayName = "Discourse",
+            deviceDisplayName = deviceDisplayName,
+            profileTag = null,
+            lang = "en",
+            append = false,
+        )
+    }
+
+    suspend fun deleteUnifiedPushPusher(endpoint: String) = withContext(Dispatchers.IO) {
+        runCatching {
+            client.deletePusher(PusherIdentifiers(pushkey = endpoint, appId = PushRegistrar.APP_ID))
+        }
+    }
+
+    /** Builds a notification client and fetches + decrypts one event for display. */
+    suspend fun notificationItem(roomId: String, eventId: String) = withContext(Dispatchers.IO) {
+        runCatching {
+            val nc = client.notificationClient(NotificationProcessSetup.MultipleProcesses)
+            nc.getNotification(roomId, eventId)
+        }.getOrNull()
     }
 
     /**

@@ -98,7 +98,10 @@ fun SettingsScaffold(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 32.dp),
+                // Extra bottom clearance for the ~80dp Material tab bar that
+                // overlays the Settings tab (systemBarsPadding above only covers
+                // the system nav inset, not the app's NavigationBar).
+                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 32.dp + 80.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
             content()

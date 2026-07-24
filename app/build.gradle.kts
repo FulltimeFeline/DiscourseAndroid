@@ -5,6 +5,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// FCM needs a Firebase project's google-services.json. Apply the plugin only
+// when it's present so the app still builds (push inactive) without it.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 android {
     namespace = "com.riiiiiiiley.discourse"
     compileSdk = 36
@@ -58,6 +64,9 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-gif:3.3.0")
     implementation("androidx.security:security-crypto:1.1.0")
     implementation("androidx.browser:browser:1.9.0")
+    // FCM push. Pusher is registered against sygnal's gcm pushkin.
+    implementation(platform("com.google.firebase:firebase-bom:34.4.0"))
+    implementation("com.google.firebase:firebase-messaging")
     // Full-screen video attachment player (VideoPlayerDialog).
     implementation("androidx.media3:media3-exoplayer:1.8.0")
     implementation("androidx.media3:media3-ui:1.8.0")

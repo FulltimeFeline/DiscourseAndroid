@@ -4,6 +4,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- In-app updater: install the APK downloaded from the GitHub release. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Push delivery when fully closed: OEMs (esp. Samsung) sleep swiped-away
+         apps and delay/drop FCM unless the app is exempt from battery optim. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Composer "Share Location": requested at runtime before shareCurrentLocation(). -->
@@ -66,6 +69,15 @@
         <receiver
             android:name=".core.NotificationActionReceiver"
             android:exported="false" />
+
+        <!-- FCM: Firebase delivers pushes to this service. -->
+        <service
+            android:name=".core.DiscourseFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
 
         <!-- Keeps mic/camera capture and the MatrixRTC heartbeat alive while a
              call is backgrounded (the analogue of the iOS `audio` background
