@@ -23,6 +23,9 @@ class LoginViewModel(private val appContext: Context) {
         val homeserver: String = "matrix.org",
         val username: String = "",
         val password: String = "",
+        val registrationToken: String = "",
+        /** Toggles the methods stage between signing in and creating an account. */
+        val isRegistering: Boolean = false,
         val isBusy: Boolean = false,
         val errorMessage: String? = null,
         val supportsPassword: Boolean = false,
@@ -34,6 +37,14 @@ class LoginViewModel(private val appContext: Context) {
 
         val canSubmitPassword: Boolean
             get() = username.trim().isNotEmpty() && password.isNotEmpty()
+
+        val canSubmitRegistration: Boolean
+            get() = username.trim().isNotEmpty() && password.isNotEmpty() &&
+                registrationToken.trim().isNotEmpty()
+
+        /** Registration signs in with a password afterward, so it needs password auth. */
+        val supportsRegistration: Boolean
+            get() = supportsPassword
     }
 
     private val _state = MutableStateFlow(UiState())
@@ -44,7 +55,12 @@ class LoginViewModel(private val appContext: Context) {
     fun setHomeserver(value: String) = update { it.copy(homeserver = value) }
     fun setUsername(value: String) = update { it.copy(username = value) }
     fun setPassword(value: String) = update { it.copy(password = value) }
+    fun setRegistrationToken(value: String) = update { it.copy(registrationToken = value) }
     fun setError(message: String?) = update { it.copy(errorMessage = message) }
+
+    /** Switch the methods stage between "sign in" and "create account". */
+    fun setRegistering(registering: Boolean) =
+        update { it.copy(isRegistering = registering, errorMessage = null) }
 
     private inline fun update(transform: (UiState) -> UiState) {
         _state.value = transform(_state.value)
@@ -83,6 +99,8 @@ class LoginViewModel(private val appContext: Context) {
                 stage = Stage.SERVER,
                 errorMessage = null,
                 password = "",
+                registrationToken = "",
+                isRegistering = false,
                 supportsPassword = false,
                 supportsOAuth = false,
                 supportsSso = false,
@@ -100,6 +118,24 @@ class LoginViewModel(private val appContext: Context) {
             pending.finishWithPassword(
                 username = _state.value.username.trim(),
                 password = _state.value.password,
+            )
+        } catch (error: Exception) {
+            update { it.copy(errorMessage = friendlyMessage(error)) }
+            null
+        } finally {
+            update { it.copy(isBusy = false) }
+        }
+    }
+
+    suspend fun register(): LoginResult? {
+        val pending = pending ?: return null
+        if (!_state.value.canSubmitRegistration || _state.value.isBusy) return null
+        update { it.copy(isBusy = true, errorMessage = null) }
+        return try {
+            pending.finishWithRegistration(
+                username = _state.value.username.trim(),
+                password = _state.value.password,
+                registrationToken = _state.value.registrationToken.trim(),
             )
         } catch (error: Exception) {
             update { it.copy(errorMessage = friendlyMessage(error)) }

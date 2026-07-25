@@ -237,10 +237,17 @@ private fun MethodsStage(
     val colors = LocalDiscourseColors.current
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val registrationTokenFocus = remember { FocusRequester() }
 
     fun browserLogin(kind: LoginViewModel.BrowserLoginKind) {
         coroutineScope.launch {
             viewModel.browserLogin(context, kind)?.let { onComplete(it) }
+        }
+    }
+
+    fun submitRegistration() {
+        coroutineScope.launch {
+            viewModel.register()?.let { onComplete(it) }
         }
     }
 
@@ -261,7 +268,9 @@ private fun MethodsStage(
     }
 
     if (ui.supportsPassword) {
-        if (ui.supportsOAuth || ui.supportsSso) {
+        if (ui.isRegistering) {
+            SectionHeader("Create your account")
+        } else if (ui.supportsOAuth || ui.supportsSso) {
             Spacer(Modifier.height(24.dp))
             SectionHeader("Or sign in with a password")
         }
@@ -274,7 +283,7 @@ private fun MethodsStage(
             FormTextField(
                 value = ui.username,
                 onValueChange = viewModel::setUsername,
-                placeholder = "@user:server",
+                placeholder = if (ui.isRegistering) "username" else "@user:server",
                 enabled = !ui.isBusy,
                 grouped = true,
                 keyboardOptions = KeyboardOptions(
@@ -297,19 +306,54 @@ private fun MethodsStage(
                 isPassword = true,
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Password,
-                    imeAction = ImeAction.Go,
+                    imeAction = if (ui.isRegistering) ImeAction.Next else ImeAction.Go,
                 ),
-                keyboardActions = KeyboardActions(onGo = { onSubmitPassword() }),
+                keyboardActions = KeyboardActions(
+                    onGo = { onSubmitPassword() },
+                    onNext = { registrationTokenFocus.requestFocus() },
+                ),
                 modifier = Modifier.focusRequester(passwordFocus),
             )
+            if (ui.isRegistering) {
+                HorizontalDivider(color = colors.separator, thickness = 1.dp)
+                FormTextField(
+                    value = ui.registrationToken,
+                    onValueChange = viewModel::setRegistrationToken,
+                    placeholder = "Registration token",
+                    enabled = !ui.isBusy,
+                    grouped = true,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        imeAction = ImeAction.Go,
+                    ),
+                    keyboardActions = KeyboardActions(onGo = { submitRegistration() }),
+                    modifier = Modifier.focusRequester(registrationTokenFocus),
+                )
+            }
+        }
+        if (ui.isRegistering) {
+            SectionFooter("You need a registration token from the server admin to create an account.")
         }
 
         Spacer(Modifier.height(20.dp))
         ProminentButton(
-            title = if (ui.isBusy) null else "Sign In",
-            enabled = ui.canSubmitPassword && !ui.isBusy,
-            onClick = onSubmitPassword,
+            title = if (ui.isBusy) null else if (ui.isRegistering) "Create Account" else "Sign In",
+            enabled = (if (ui.isRegistering) ui.canSubmitRegistration else ui.canSubmitPassword) && !ui.isBusy,
+            onClick = { if (ui.isRegistering) submitRegistration() else onSubmitPassword() },
         )
+
+        if (ui.supportsRegistration) {
+            Spacer(Modifier.height(4.dp))
+            TextButton(onClick = { viewModel.setRegistering(!ui.isRegistering) }) {
+                Text(
+                    text = if (ui.isRegistering) "Already have an account? Sign in"
+                        else "New here? Create an account",
+                    color = colors.accent,
+                    fontSize = 15.sp,
+                )
+            }
+        }
     }
 
     if (!ui.supportsPassword && !ui.supportsOAuth && !ui.supportsSso) {

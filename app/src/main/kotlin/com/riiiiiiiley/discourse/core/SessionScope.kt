@@ -14,6 +14,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.matrix.rustcomponents.sdk.SessionVerificationControllerDelegate
 import org.matrix.rustcomponents.sdk.SessionVerificationData
@@ -120,8 +121,12 @@ class SessionScope(
     val userId: String get() = service.userId
 
     suspend fun loadOwnProfile() {
-        runCatching { service.client.avatarUrl() }.getOrNull()?.let { _ownAvatarUrl.value = it }
-        runCatching { service.client.displayName() }.getOrNull()?.let { _ownDisplayName.value = it }
+        // avatarUrl()/displayName() are blocking FFI; loadOwnProfile runs from a
+        // Main-dispatched LaunchedEffect, so keep them off the main thread.
+        withContext(Dispatchers.IO) { runCatching { service.client.avatarUrl() }.getOrNull() }
+            ?.let { _ownAvatarUrl.value = it }
+        withContext(Dispatchers.IO) { runCatching { service.client.displayName() }.getOrNull() }
+            ?.let { _ownDisplayName.value = it }
         service.fetchProfile(service.userId)?.let { profile ->
             _ownPronouns.value = profile.pronouns
             _ownBio.value = profile.bio
@@ -266,8 +271,12 @@ class SessionScope(
 
     fun startVerificationMonitor() {
         if (verificationJob != null) return
-        _needsVerification.value = service.verificationState == VerificationState.UNVERIFIED
         verificationJob = scope.launch {
+            // verificationState is a blocking FFI read; startVerificationMonitor
+            // is called on Main, so seed the initial value off-main before the
+            // live collection takes over.
+            _needsVerification.value =
+                withContext(Dispatchers.IO) { service.verificationState } == VerificationState.UNVERIFIED
             service.verificationStates().collect { state ->
                 _needsVerification.value = state == VerificationState.UNVERIFIED
             }
@@ -299,7 +308,7 @@ class SessionScope(
             override fun didFinish() = Unit
         }
         verificationDelegate = delegate
-        controller.setDelegate(delegate)
+        withContext(Dispatchers.IO) { controller.setDelegate(delegate) }
     }
 
     // MARK: Timeline view-model cache

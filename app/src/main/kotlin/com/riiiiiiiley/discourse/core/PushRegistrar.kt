@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
 import androidx.core.content.edit
 import com.google.firebase.messaging.FirebaseMessaging
 import com.riiiiiiiley.discourse.app.AppState
@@ -27,6 +28,8 @@ import org.matrix.rustcomponents.sdk.NotificationStatus
  * leaves the server; the event is fetched and decrypted on the device.
  */
 object PushRegistrar {
+    private const val TAG = "DiscoursePush"
+
     /** Matches the app entry (key) in sygnal.yaml. */
     const val APP_ID = "com.riiiiiiiley.discourse"
 
@@ -108,25 +111,42 @@ object PushRegistrar {
 
         // The event_id-only push doesn't say which account it's for, so try each
         // signed-in account until one resolves the event (that's its owner).
+        val services = candidateServices(context)
+        val appWarm = (context.applicationContext as? DiscourseApplication)?.appStateOrNull != null
+        Log.i(TAG, "push room=$roomId event=$eventId warm=$appWarm candidates=${services.size}")
         var item: org.matrix.rustcomponents.sdk.NotificationItem? = null
         var accountUserId: String? = null
-        for (service in candidateServices(context)) {
-            val status = runCatching { service.notificationItem(roomId, eventId) }.getOrNull()
+        for (service in services) {
+            val status = runCatching { service.notificationItem(roomId, eventId) }
+                .onFailure { Log.w(TAG, "notificationItem(${service.userId}) threw: $it") }
+                .getOrNull()
+            Log.i(TAG, "  ${service.userId} -> ${status?.javaClass?.simpleName ?: "null"}")
             if (status is NotificationStatus.Event) {
                 item = status.item
                 accountUserId = service.userId
                 break
             }
         }
-        if (item == null || accountUserId == null) return
+        if (item == null || accountUserId == null) {
+            Log.w(TAG, "no account resolved the event — nothing to show")
+            return
+        }
 
         val sender = item.senderInfo.displayName
         val room = item.roomInfo.displayName
         // The decrypted event's raw JSON gives us the message body directly.
+        val rawEvent = item.rawEvent
+        val rawType = runCatching { JSONObject(rawEvent).optString("type") }.getOrNull()
         val body = runCatching {
-            JSONObject(item.rawEvent).optJSONObject("content")?.optString("body")
+            JSONObject(rawEvent).optJSONObject("content")?.optString("body")
         }.getOrNull()?.takeIf { it.isNotBlank() }
             ?: if (item.event is NotificationEvent.Invite) "invited you" else "New message"
+        Log.i(
+            TAG,
+            "resolved account=$accountUserId sender=${sender ?: "<null>"} " +
+                "room=${room ?: "<null>"} rawType=$rawType " +
+                "event=${item.event.javaClass.simpleName} bodyLen=${body.length} noisy=${item.isNoisy}",
+        )
 
         val isDirect = sender.isNullOrBlank() || sender == room
         val title = if (isDirect) (sender ?: room ?: "Discourse") else (room ?: sender ?: "Discourse")
@@ -160,8 +180,12 @@ object PushRegistrar {
         if (warm.isNotEmpty()) return warm
         // Cold push: restore all stored accounts (no sync, no UI change).
         val store = SessionStore(context)
-        return store.loadAll().mapNotNull { token ->
-            runCatching { MatrixService.restore(token, context) }.getOrNull()
+        val tokens = store.loadAll()
+        Log.i(TAG, "cold restore: ${tokens.size} stored account(s)")
+        return tokens.mapNotNull { token ->
+            runCatching { MatrixService.restore(token, context) }
+                .onFailure { Log.w(TAG, "restore(${token.session.userId}) failed: $it") }
+                .getOrNull()
         }
     }
 }

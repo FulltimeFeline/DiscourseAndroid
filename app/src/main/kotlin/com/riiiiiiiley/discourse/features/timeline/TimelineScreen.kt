@@ -25,6 +25,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -35,6 +37,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -914,13 +917,23 @@ private fun RoomDetailsSheet(
     val canInvite by viewModel.canInvite.collectAsStateWithLifecycle()
     val canKick by viewModel.canKick.collectAsStateWithLifecycle()
     val canBan by viewModel.canBan.collectAsStateWithLifecycle()
+    val canChangePowerLevels by viewModel.canChangePowerLevels.collectAsStateWithLifecycle()
+    val ownPowerLevel by viewModel.ownPowerLevel.collectAsStateWithLifecycle()
     // Observed so role headers re-resolve as the Cinny tags event loads.
     val powerLevelTags by viewModel.powerLevelTags.collectAsStateWithLifecycle()
 
     var query by remember { mutableStateOf("") }
     var moderation by remember { mutableStateOf<ModerationAction?>(null) }
     var moderationError by remember { mutableStateOf<String?>(null) }
+    var customLevelTarget by remember { mutableStateOf<TimelineViewModel.MemberItem?>(null) }
+    var roleError by remember { mutableStateOf<String?>(null) }
     var showsMediaGallery by remember { mutableStateOf(false) }
+
+    fun applyRole(member: TimelineViewModel.MemberItem, level: Int) {
+        scope.launch {
+            roleError = viewModel.setPowerLevel(member.id, level.coerceIn(0, ownPowerLevel))
+        }
+    }
 
     LaunchedEffect(Unit) { viewModel.loadMembers() }
 
@@ -1057,6 +1070,11 @@ private fun RoomDetailsSheet(
                     emoteLoader = emoteLoader,
                     canKick = canKick,
                     canBan = canBan,
+                    canChangeRoles = canChangePowerLevels,
+                    ownPowerLevel = ownPowerLevel,
+                    onSetRole = { level ->
+                        if (level == null) customLevelTarget = member else applyRole(member, level)
+                    },
                     dimmed = dimmed,
                     onOpenProfile = {
                         onOpenProfile(ProfileTarget(member.id, member.displayName, member.avatarUrl))
@@ -1161,6 +1179,43 @@ private fun RoomDetailsSheet(
             title = { Text("Couldn't do that") },
             text = { Text(message) },
             confirmButton = { TextButton(onClick = { moderationError = null }) { Text("OK") } },
+        )
+    }
+    customLevelTarget?.let { member ->
+        var levelText by remember(member.id) { mutableStateOf(member.powerLevel.toString()) }
+        AlertDialog(
+            onDismissRequest = { customLevelTarget = null },
+            title = { Text("Set power level") },
+            text = {
+                Column {
+                    Text("Higher levels have more privileges. You can grant up to your own level ($ownPowerLevel).",
+                        fontSize = 13.sp)
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = levelText,
+                        onValueChange = { levelText = it.filter(Char::isDigit) },
+                        singleLine = true,
+                        label = { Text("0–$ownPowerLevel") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val level = levelText.toIntOrNull()
+                    customLevelTarget = null
+                    if (level != null) applyRole(member, level)
+                }) { Text("Set") }
+            },
+            dismissButton = { TextButton(onClick = { customLevelTarget = null }) { Text("Cancel") } },
+        )
+    }
+    roleError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { roleError = null },
+            title = { Text("Couldn't change role") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { roleError = null }) { Text("OK") } },
         )
     }
 }
@@ -1403,12 +1458,17 @@ private fun MemberRow(
     emoteLoader: EmoteAssetLoader?,
     canKick: Boolean,
     canBan: Boolean,
+    canChangeRoles: Boolean = false,
+    ownPowerLevel: Int = 0,
+    onSetRole: (level: Int?) -> Unit = {},
     dimmed: Boolean = false,
     onOpenProfile: () -> Unit,
     onMessage: () -> Unit,
     onCopyId: () -> Unit,
     onModerate: (isBan: Boolean) -> Unit,
 ) {
+    // Can re-level a target strictly below our own level (and not ourselves).
+    val canSetRole = canChangeRoles && member.id != ownUserId && member.powerLevel < ownPowerLevel
     val colors = LocalDiscourseColors.current
     var menuExpanded by remember { mutableStateOf(false) }
     // iOS MemberRowLabel: presence dot on the avatar, pronouns tag next to
@@ -1474,6 +1534,31 @@ private fun MemberRow(
                 menuExpanded = false
                 onCopyId()
             })
+            if (canSetRole) {
+                HorizontalDivider()
+                if (ownPowerLevel >= 100 && member.powerLevel != 100) {
+                    DropdownMenuItem(text = { Text("Make Administrator (100)") }, onClick = {
+                        menuExpanded = false
+                        onSetRole(100)
+                    })
+                }
+                if (ownPowerLevel > 50 && member.powerLevel != 50) {
+                    DropdownMenuItem(text = { Text("Make Moderator (50)") }, onClick = {
+                        menuExpanded = false
+                        onSetRole(50)
+                    })
+                }
+                if (member.powerLevel != 0) {
+                    DropdownMenuItem(text = { Text("Make Member (0)") }, onClick = {
+                        menuExpanded = false
+                        onSetRole(0)
+                    })
+                }
+                DropdownMenuItem(text = { Text("Set level…") }, onClick = {
+                    menuExpanded = false
+                    onSetRole(null)
+                })
+            }
             if (member.id != ownUserId && (canKick || canBan)) {
                 HorizontalDivider()
                 if (canKick) {

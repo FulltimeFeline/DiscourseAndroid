@@ -58,6 +58,7 @@ import org.matrix.rustcomponents.sdk.RoomInfo
 import org.matrix.rustcomponents.sdk.RoomInfoListener
 import org.matrix.rustcomponents.sdk.RoomMessageEventContentWithoutRelation
 import org.matrix.rustcomponents.sdk.RoomMessageEventMessageType
+import org.matrix.rustcomponents.sdk.StateEventType
 import org.matrix.rustcomponents.sdk.ThumbnailInfo
 import org.matrix.rustcomponents.sdk.Timeline
 import org.matrix.rustcomponents.sdk.TimelineConfiguration
@@ -66,6 +67,7 @@ import org.matrix.rustcomponents.sdk.TimelineFilter
 import org.matrix.rustcomponents.sdk.TimelineFocus
 import org.matrix.rustcomponents.sdk.TimelineListener
 import org.matrix.rustcomponents.sdk.TypingNotificationsListener
+import org.matrix.rustcomponents.sdk.UserPowerLevelUpdate
 import org.matrix.rustcomponents.sdk.UploadParameters
 import org.matrix.rustcomponents.sdk.UploadSource
 import org.matrix.rustcomponents.sdk.VideoInfo
@@ -520,6 +522,14 @@ class TimelineViewModel(
     private val _canRedactOther = MutableStateFlow(false)
     val canRedactOther: StateFlow<Boolean> = _canRedactOther
 
+    /** Whether the own user may change members' power levels (promote/demote). */
+    private val _canChangePowerLevels = MutableStateFlow(false)
+    val canChangePowerLevels: StateFlow<Boolean> = _canChangePowerLevels
+
+    /** The own user's power level — the ceiling on what we can grant. */
+    private val _ownPowerLevel = MutableStateFlow(0)
+    val ownPowerLevel: StateFlow<Int> = _ownPowerLevel
+
     /** Reports a message to the homeserver admins. Returns an error, or null on success. */
     suspend fun report(eventId: String, reason: String?): String? = try {
         room.reportContent(eventId, reason)
@@ -546,6 +556,27 @@ class TimelineViewModel(
         _canBan.value = levels.canOwnUserBan()
         _canRedactOwn.value = levels.canOwnUserRedactOwn()
         _canRedactOther.value = levels.canOwnUserRedactOther()
+        _canChangePowerLevels.value =
+            levels.canOwnUserSendState(StateEventType.RoomPowerLevels)
+        _ownPowerLevel.value = levels.userPowerLevels()[ownUserId]?.toInt()
+            ?: levels.values().usersDefault.toInt()
+    }
+
+    /**
+     * Sets a member's power level (promote/demote). Returns an error message on
+     * failure. Refreshes members so the role label updates.
+     */
+    suspend fun setPowerLevel(userId: String, level: Int): String? = try {
+        withContext(Dispatchers.IO) {
+            room.updatePowerLevelsForUsers(
+                listOf(UserPowerLevelUpdate(userId = userId, powerLevel = level.toLong())))
+        }
+        loadMembers(force = true)
+        null
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        error.message ?: "Couldn't change the role"
     }
 
     /** Removes a member (kick). Returns an error message on failure. */

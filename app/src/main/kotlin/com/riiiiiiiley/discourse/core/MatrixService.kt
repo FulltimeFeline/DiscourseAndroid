@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -71,6 +72,11 @@ sealed class MatrixServiceException(message: String) : Exception(message) {
         "This homeserver doesn't support password login. OAuth sign-in is coming soon.")
 
     class SessionNotFound : MatrixServiceException("No stored session for this account.")
+
+    class RegistrationUnsupported : MatrixServiceException(
+        "This homeserver doesn't allow creating an account from the app.")
+
+    class RegistrationFailed(message: String) : MatrixServiceException(message)
 }
 
 /**
@@ -535,6 +541,8 @@ class MatrixService private constructor(
      * bridge + handle as `retained`).
      */
     fun verificationStates(): Flow<VerificationState> = callbackFlow {
+        // encryption()/verificationStateListener are blocking FFI; flowOn(IO)
+        // keeps the listener setup + teardown off the collector's Main thread.
         val handle = client.encryption().verificationStateListener(object : VerificationStateListener {
             override fun onUpdate(status: VerificationState) {
                 trySend(status)
@@ -544,7 +552,7 @@ class MatrixService private constructor(
             handle.cancel()
             handle.close()
         }
-    }
+    }.flowOn(Dispatchers.IO)
 
     private var cachedVerificationController: SessionVerificationController? = null
 
@@ -557,7 +565,8 @@ class MatrixService private constructor(
      */
     suspend fun sessionVerificationController(): SessionVerificationController {
         cachedVerificationController?.let { return it }
-        val controller = client.getSessionVerificationController()
+        // getSessionVerificationController is blocking FFI; callers are on Main.
+        val controller = withContext(Dispatchers.IO) { client.getSessionVerificationController() }
         cachedVerificationController = controller
         return controller
     }
@@ -1124,6 +1133,117 @@ class PendingLogin internal constructor(
         client.login(username = username, password = password,
             initialDeviceName = "Discourse (Android)", deviceId = null)
         finish()
+    }
+
+    /**
+     * Creates a new account, then signs in. The Rust SDK exposes no
+     * registration API, so this drives `/_matrix/client/v3/register` directly:
+     * an initial call yields a UIA session, which we satisfy with the
+     * registration token (this homeserver's only registration flow), plus any
+     * trailing `m.login.dummy` stage. `inhibit_login` keeps registration from
+     * minting a throwaway device — once the account exists we log in through the
+     * SDK's own path, so the session/crypto setup is identical to a normal login.
+     */
+    suspend fun finishWithRegistration(
+        username: String,
+        password: String,
+        registrationToken: String,
+    ): LoginResult = withContext(Dispatchers.IO) {
+        val base = client.homeserver().trimEnd('/')
+        val registerUrl = "$base/_matrix/client/v3/register"
+
+        var auth: JSONObject? = null
+        var sessionId: String? = null
+        // Bounded: a single token stage (optionally + dummy). The cap stops a
+        // misbehaving server from looping forever.
+        repeat(5) {
+            val body = JSONObject().apply {
+                put("username", username)
+                put("password", password)
+                put("initial_device_display_name", "Discourse (Android)")
+                put("inhibit_login", true)
+                auth?.let { put("auth", it) }
+            }
+            val (code, response) = registerRequest(registerUrl, body.toString())
+                ?: throw MatrixServiceException.RegistrationFailed("Couldn't reach the homeserver.")
+            val json = runCatching { JSONObject(response ?: "") }.getOrNull()
+
+            when (code) {
+                200 -> {
+                    // Account created (no device, thanks to inhibit_login) — sign in.
+                    client.login(username = username, password = password,
+                        initialDeviceName = "Discourse (Android)", deviceId = null)
+                    return@withContext finish()
+                }
+                401 -> {
+                    // User-interactive auth: hand back the registration token, then
+                    // satisfy any trailing dummy stage once the token is accepted.
+                    sessionId = json?.optString("session")?.ifBlank { null } ?: sessionId
+                    val sid = sessionId ?: throw MatrixServiceException.RegistrationFailed(
+                        "Registration couldn't start on this homeserver.")
+                    val completed = json?.optJSONArray("completed")?.let { arr ->
+                        (0 until arr.length()).map { arr.optString(it) }
+                    } ?: emptyList()
+                    val stages = buildList {
+                        json?.optJSONArray("flows")?.let { flows ->
+                            for (i in 0 until flows.length()) {
+                                flows.optJSONObject(i)?.optJSONArray("stages")?.let { st ->
+                                    for (j in 0 until st.length()) add(st.optString(j))
+                                }
+                            }
+                        }
+                    }
+                    if (stages.isNotEmpty() && !stages.contains("m.login.registration_token")) {
+                        // A flow we don't drive from a native form (recaptcha/email/terms).
+                        throw MatrixServiceException.RegistrationUnsupported()
+                    }
+                    auth = if (completed.contains("m.login.registration_token")) {
+                        JSONObject().put("type", "m.login.dummy").put("session", sid)
+                    } else {
+                        JSONObject().put("type", "m.login.registration_token")
+                            .put("token", registrationToken).put("session", sid)
+                    }
+                }
+                else -> throw registrationError(json, code)
+            }
+        }
+        throw MatrixServiceException.RegistrationFailed("Registration didn't complete. Please try again.")
+    }
+
+    /** POST JSON to the register endpoint; (status, body) or null on transport error. */
+    private fun registerRequest(url: String, body: String): Pair<Int, String?>? =
+        runCatching {
+            val conn = URI(url).toURL().openConnection() as HttpURLConnection
+            try {
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 15_000
+                conn.readTimeout = 15_000
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.doOutput = true
+                conn.outputStream.use { it.write(body.toByteArray()) }
+                val code = conn.responseCode
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val text = stream?.bufferedReader()?.use { it.readText() }
+                code to text
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrNull()
+
+    /** Maps a `/register` error body to a friendly message. */
+    private fun registrationError(json: JSONObject?, status: Int): MatrixServiceException {
+        val serverMessage = json?.optString("error")?.ifBlank { null }
+        return when (json?.optString("errcode")) {
+            "M_USER_IN_USE" -> MatrixServiceException.RegistrationFailed("That username is already taken.")
+            "M_INVALID_USERNAME" -> MatrixServiceException.RegistrationFailed(
+                "That username isn't allowed. Use lowercase letters, numbers, and ._=-/")
+            "M_WEAK_PASSWORD" -> MatrixServiceException.RegistrationFailed(
+                serverMessage?.let { "Weak password: $it" } ?: "That password is too weak.")
+            "M_EXCLUSIVE" -> MatrixServiceException.RegistrationFailed("That username is reserved.")
+            "M_FORBIDDEN" -> MatrixServiceException.RegistrationFailed("That registration token isn't valid.")
+            else -> MatrixServiceException.RegistrationFailed(
+                serverMessage ?: "Registration failed (HTTP $status).")
+        }
     }
 
     /** OAuth step 1: the browser URL to authorize at. */

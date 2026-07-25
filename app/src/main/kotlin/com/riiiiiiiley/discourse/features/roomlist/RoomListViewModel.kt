@@ -346,23 +346,29 @@ class RoomListViewModel(
         try {
             service.startSync()
             val roomListService = service.roomListService ?: return
-            val roomList = roomListService.allRooms()
-
-            val entriesBridge = EntriesBridge()
-            val result = roomList.entriesWithDynamicAdapters(200u, entriesBridge)
-            val controller = result.controller()
-            // deduplicateVersions: after a room upgrade, hide the tombstoned room and
-            // show only its replacement.
-            controller.setFilter(RoomListEntriesDynamicFilterKind.All(filters = listOf(
-                RoomListEntriesDynamicFilterKind.NonLeft,
-                RoomListEntriesDynamicFilterKind.DeduplicateVersions,
-            )))
-
-            val loadingBridge = LoadingBridge()
-            val loadingResult = roomList.loadingState(loadingBridge)
-
-            retained = mutableListOf(roomList, entriesBridge, result, controller,
-                                     result.entriesStream(), loadingBridge, loadingResult)
+            // allRooms() + the dynamic-adapter/loading-state wiring are blocking
+            // FFI. start() runs from a Main-dispatched LaunchedEffect, so doing
+            // them inline froze the main thread right after login/launch (ANR).
+            // Build the whole sliding-sync pipeline off-main; the diff/loading
+            // collectors below still hop back to Main via `scope`.
+            lateinit var entriesBridge: EntriesBridge
+            lateinit var loadingBridge: LoadingBridge
+            withContext(Dispatchers.IO) {
+                val roomList = roomListService.allRooms()
+                entriesBridge = EntriesBridge()
+                val result = roomList.entriesWithDynamicAdapters(200u, entriesBridge)
+                val controller = result.controller()
+                // deduplicateVersions: after a room upgrade, hide the tombstoned
+                // room and show only its replacement.
+                controller.setFilter(RoomListEntriesDynamicFilterKind.All(filters = listOf(
+                    RoomListEntriesDynamicFilterKind.NonLeft,
+                    RoomListEntriesDynamicFilterKind.DeduplicateVersions,
+                )))
+                loadingBridge = LoadingBridge()
+                val loadingResult = roomList.loadingState(loadingBridge)
+                retained = mutableListOf(roomList, entriesBridge, result, controller,
+                                         result.entriesStream(), loadingBridge, loadingResult)
+            }
 
             streamJobs.add(scope.launch {
                 for (diffs in entriesBridge.channel) {
@@ -424,11 +430,15 @@ class RoomListViewModel(
     // MARK: Spaces
 
     private suspend fun startSpaces() {
-        val spaceService = service.client.spaceService()
+        // spaceService()/subscribe/topLevelJoinedSpaces are blocking FFI; keep
+        // them off the main thread (startSpaces runs in start()'s call chain).
+        val spaceService = withContext(Dispatchers.IO) { service.client.spaceService() }
         this.spaceService = spaceService
         val bridge = JoinedSpacesBridge()
         retained.add(bridge)
-        retained.add(spaceService.subscribeToTopLevelJoinedSpaces(bridge))
+        retained.add(withContext(Dispatchers.IO) {
+            spaceService.subscribeToTopLevelJoinedSpaces(bridge)
+        })
         streamJobs.add(scope.launch {
             for (diffs in bridge.channel) {
                 // spaceItem reads roomId/displayName/avatarUrl/topic FFI per
@@ -437,7 +447,7 @@ class RoomListViewModel(
                 applySpaceDiffs(diffs, items)
             }
         })
-        val topLevel = spaceService.topLevelJoinedSpaces()
+        val topLevel = withContext(Dispatchers.IO) { spaceService.topLevelJoinedSpaces() }
         val topLevelItems = withContext(Dispatchers.IO) {
             java.util.IdentityHashMap<SpaceRoom, SpaceItem>().apply {
                 topLevel.forEach { if (!containsKey(it)) put(it, spaceItem(it)) }
@@ -517,39 +527,45 @@ class RoomListViewModel(
     private suspend fun loadSpaceChildren(spaceId: String): List<SpaceChild>? {
         val spaceService = spaceService ?: return null
         return try {
-            val list = spaceService.spaceRoomList(spaceId)
-            spaceRoomLists[spaceId] = list
-            // Drive pagination to completion. The list starts out .loading, so wait
-            // through that rather than bailing early.
-            var guardCounter = 0
-            paging@ while (guardCounter < 200) {
-                guardCounter++
-                when (val state = list.paginationState()) {
-                    is SpaceRoomListPaginationState.Idle -> {
-                        if (state.endReached) break@paging
-                        list.paginate()
+            // spaceRoomList + the pagination loop + per-child getters are blocking
+            // FFI (and paginate() hits the network). This runs in start()'s
+            // Main-dispatched chain, so build the child list off-main and only
+            // splice the state on Main below.
+            val (list, children) = withContext(Dispatchers.IO) {
+                val list = spaceService.spaceRoomList(spaceId)
+                // Drive pagination to completion. The list starts out .loading, so
+                // wait through that rather than bailing early.
+                var guardCounter = 0
+                paging@ while (guardCounter < 200) {
+                    guardCounter++
+                    when (val state = list.paginationState()) {
+                        is SpaceRoomListPaginationState.Idle -> {
+                            if (state.endReached) break@paging
+                            list.paginate()
+                        }
+                        is SpaceRoomListPaginationState.Loading -> delay(50)
                     }
-                    is SpaceRoomListPaginationState.Loading -> delay(50)
+                }
+                val ffiChildren = list.rooms()
+                // The space listing reports plain `room` even for video rooms; the
+                // hierarchy endpoint is the only source of the type.
+                val hierarchyVideoIds = service.videoRoomIds(inSpace = spaceId)
+                list to ffiChildren.map { child ->
+                    SpaceChild(
+                        id = child.roomId,
+                        name = child.displayName,
+                        isSpace = child.roomType is org.matrix.rustcomponents.sdk.RoomType.Space,
+                        isVideoRoom = isVideoRoomType(child.roomType) ||
+                            hierarchyVideoIds.contains(child.roomId),
+                        avatarUrl = child.avatarUrl,
+                        topic = child.topic,
+                        memberCount = child.numJoinedMembers,
+                        isJoined = child.state == org.matrix.rustcomponents.sdk.Membership.JOINED,
+                        via = child.via,
+                    )
                 }
             }
-            val ffiChildren = list.rooms()
-            // The space listing reports plain `room` even for video rooms; the
-            // hierarchy endpoint is the only source of the type.
-            val hierarchyVideoIds = service.videoRoomIds(inSpace = spaceId)
-            val children = ffiChildren.map { child ->
-                SpaceChild(
-                    id = child.roomId,
-                    name = child.displayName,
-                    isSpace = child.roomType is org.matrix.rustcomponents.sdk.RoomType.Space,
-                    isVideoRoom = isVideoRoomType(child.roomType) ||
-                        hierarchyVideoIds.contains(child.roomId),
-                    avatarUrl = child.avatarUrl,
-                    topic = child.topic,
-                    memberCount = child.numJoinedMembers,
-                    isJoined = child.state == org.matrix.rustcomponents.sdk.Membership.JOINED,
-                    via = child.via,
-                )
-            }
+            spaceRoomLists[spaceId] = list
             // Equality-guarded (via StateFlow): these refresh on every space diff,
             // and a no-op write would still invalidate every sidebar view.
             val ids = children.map { it.id }.toSet()
