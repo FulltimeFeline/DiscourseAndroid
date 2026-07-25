@@ -47,6 +47,7 @@ import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.SyncServiceState
 import org.matrix.rustcomponents.sdk.SyncServiceStateObserver
 import org.matrix.rustcomponents.sdk.TaskHandle
+import org.matrix.rustcomponents.sdk.UserPowerLevelUpdate
 import org.matrix.rustcomponents.sdk.VerificationState
 import org.matrix.rustcomponents.sdk.VerificationStateListener
 import uniffi.matrix_sdk.BackupDownloadStrategy
@@ -521,6 +522,58 @@ class MatrixService private constructor(
                     room.optString("room_id").takeIf { it.isNotEmpty() }?.let { add(it) }
                 }
             }
+        }
+    }
+
+    /**
+     * Every actual room inside a space (recursively), via the hierarchy API —
+     * used to fan a space's role settings out to its rooms. Excludes the space
+     * itself and any sub-spaces.
+     */
+    suspend fun spaceChildRoomIds(inSpace: String): List<String> {
+        val session = session() ?: return emptyList()
+        val base = apiBase() ?: return emptyList()
+        val ids = mutableListOf<String>()
+        var from: String? = null
+        repeat(20) {
+            var url = "$base/_matrix/client/v1/rooms/${encodePath(inSpace)}/hierarchy?limit=100&max_depth=5"
+            from?.let { url += "&from=${encodePath(it)}" }
+            val (code, response) = httpRequest(method = "GET", url = url, bearer = session.accessToken)
+                ?: return ids.distinct()
+            if (code != 200) return ids.distinct()
+            val json = runCatching { JSONObject(response ?: "") }.getOrNull() ?: return ids.distinct()
+            val rooms = json.optJSONArray("rooms") ?: return ids.distinct()
+            for (i in 0 until rooms.length()) {
+                val room = rooms.optJSONObject(i) ?: continue
+                val id = room.optString("room_id").takeIf { it.isNotEmpty() } ?: continue
+                if (id != inSpace && room.optString("room_type") != "m.space") ids.add(id)
+            }
+            from = json.optString("next_batch").takeIf { it.isNotEmpty() } ?: return ids.distinct()
+        }
+        return ids.distinct()
+    }
+
+    /**
+     * Copies a space's role config (power-level `users` map + Cinny role-label
+     * tags) onto one room, so a room created in / added to the space inherits
+     * the space's roles. Best-effort.
+     */
+    suspend fun copySpaceRolesToRoom(spaceId: String, roomId: String) {
+        withContext(Dispatchers.IO) {
+            val space = runCatching { client.getRoom(spaceId) }.getOrNull()
+            val levels = space?.let { runCatching { it.getPowerLevels() }.getOrNull() }
+            val users = levels?.userPowerLevels().orEmpty()
+            if (users.isNotEmpty()) {
+                val room = runCatching { client.getRoom(roomId) }.getOrNull()
+                if (room != null) {
+                    val updates = users.map { UserPowerLevelUpdate(userId = it.key, powerLevel = it.value) }
+                    runCatching { room.updatePowerLevelsForUsers(updates) }
+                }
+            }
+        }
+        val tags = stateEventContent(roomId = spaceId, type = PowerLevelTags.eventType)
+        if (tags != null && tags.length() > 0) {
+            setStateEvent(roomId = roomId, type = PowerLevelTags.eventType, content = tags)
         }
     }
 

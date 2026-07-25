@@ -667,6 +667,8 @@ class RoomListViewModel(
         for (attempt in 0 until 10) {
             try {
                 spaceService.addChildToSpace(roomId, intoSpace)
+                // Inherit the space's roles (power levels + role labels).
+                runCatching { service.copySpaceRolesToRoom(spaceId = intoSpace, roomId = roomId) }
                 spaceChildIdsMap[intoSpace] = (spaceChildIdsMap[intoSpace] ?: emptySet()) + roomId
                 rebuildAllSpaceChildIds()
                 if (_selectedSpaceId.value == intoSpace) {

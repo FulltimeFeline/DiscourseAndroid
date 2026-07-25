@@ -418,8 +418,12 @@ class RoomSettingsModel(
             .filter { it.value != PowerLevelTags.defaultTag(it.key) }
         run {
             val room = room ?: return@run
-            room.sendStateEventRaw(
-                PowerLevelTags.eventType, "", PowerLevelTags.content(tags).toString())
+            val content = PowerLevelTags.content(tags).toString()
+            room.sendStateEventRaw(PowerLevelTags.eventType, "", content)
+            // For a space, write the same labels to every room inside it.
+            for (child in spaceChildRooms()) {
+                runCatching { child.sendStateEventRaw(PowerLevelTags.eventType, "", content) }
+            }
         }
     }
 
@@ -568,15 +572,31 @@ class RoomSettingsModel(
     fun setUserLevel(userId: String, level: Long) {
         val room = room ?: return
         run {
-            room.updatePowerLevelsForUsers(listOf(
-                UserPowerLevelUpdate(userId, level)
-            ))
+            val update = listOf(UserPowerLevelUpdate(userId, level))
+            room.updatePowerLevelsForUsers(update)
+            // For a space, apply to every room inside it too.
+            for (child in spaceChildRooms()) {
+                runCatching { child.updatePowerLevelsForUsers(update) }
+            }
         }
     }
 
     fun applyPermissions(changes: RoomPowerLevelChanges) {
         val room = room ?: return
-        run { room.applyPowerLevelChanges(changes) }
+        run {
+            room.applyPowerLevelChanges(changes)
+            for (child in spaceChildRooms()) {
+                runCatching { child.applyPowerLevelChanges(changes) }
+            }
+        }
+    }
+
+    /** Rooms a space's role settings fan out to (empty for a regular room). */
+    private suspend fun spaceChildRooms(): List<org.matrix.rustcomponents.sdk.Room> {
+        if (!target.isSpace) return emptyList()
+        return scope.service.spaceChildRoomIds(target.roomId).mapNotNull { id ->
+            runCatching { scope.service.client.getRoom(id) }.getOrNull()
+        }
     }
 
     /**
