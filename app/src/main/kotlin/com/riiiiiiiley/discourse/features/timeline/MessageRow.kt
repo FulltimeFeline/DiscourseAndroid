@@ -11,6 +11,7 @@ import android.icu.lang.UProperty
 import android.icu.text.BreakIterator
 import android.net.Uri
 import android.util.LruCache
+import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
@@ -563,6 +564,9 @@ fun MessageRow(
             }
         }
 
+        fun toast(text: String) =
+            Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+
         MessageContextMenu(
             expanded = menuExpanded,
             onDismiss = { menuExpanded = false },
@@ -587,19 +591,35 @@ fun MessageRow(
                 context.startActivity(Intent.createChooser(intent, null))
             },
             // Temp-file → share sheet / MediaStore, the iOS shareImage /
-            // saveImageToPhotos pair (MessageRow.swift).
+            // saveImageToPhotos pair (MessageRow.swift). Every branch reports:
+            // silence here reads as "nothing happened", and users re-tap and
+            // write duplicates. Toast, not Snackbar — the row also renders
+            // inside the thread sheet, where a host wouldn't be on screen.
             shareImage = { item ->
                 val loader = mediaLoader
                 if (loader != null) scope.launch {
-                    val data = loader.fullContent(item.source) ?: return@launch
-                    MediaExport.share(context, data, item.filename.ifEmpty { "image" })
+                    val data = loader.fullContent(item.source)
+                    if (data == null) {
+                        toast("Couldn't download that image")
+                        return@launch
+                    }
+                    // Success is only "the chooser opened", so don't announce it.
+                    if (!MediaExport.share(context, data, item.filename.ifEmpty { "image" })) {
+                        toast("Couldn't share that image")
+                    }
                 }
             },
             saveImage = { item ->
                 val loader = mediaLoader
                 if (loader != null) scope.launch {
-                    val data = loader.fullContent(item.source) ?: return@launch
-                    MediaExport.saveToGallery(context, data, item.filename.ifEmpty { "image" })
+                    val data = loader.fullContent(item.source)
+                    if (data == null) {
+                        toast("Couldn't download that image")
+                        return@launch
+                    }
+                    val saved =
+                        MediaExport.saveToGallery(context, data, item.filename.ifEmpty { "image" })
+                    toast(if (saved) "Saved to gallery" else "Couldn't save")
                 }
             },
         )

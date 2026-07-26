@@ -2,11 +2,21 @@ package com.riiiiiiiley.discourse.app
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -17,6 +27,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.riiiiiiiley.discourse.core.SessionScope
 import com.riiiiiiiley.discourse.core.ReactionUsage
@@ -45,6 +57,10 @@ import com.riiiiiiiley.discourse.features.timeline.PollView
 import com.riiiiiiiley.discourse.models.MessageItem
 import com.riiiiiiiley.discourse.models.TimelineEntry
 import com.riiiiiiiley.discourse.ui.theme.LocalDiscourseColors
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 
 /** A thread sheet target: a FRESH thread view model per open (iOS parity). */
 private class ThreadTarget(val id: String, val viewModel: TimelineViewModel)
@@ -67,20 +83,58 @@ fun RoomTimelineLayer(
 ) {
     val colors = LocalDiscourseColors.current
     val context = LocalContext.current
-    val rooms by scope.roomList.rooms.collectAsStateWithLifecycle()
 
     var timelineVm by remember(roomId) { mutableStateOf(scope.timeline(roomId)) }
-    LaunchedEffect(roomId, rooms) {
-        if (timelineVm == null) timelineVm = scope.timeline(roomId)
+    // Collected INSIDE the effect, not in composition: reading the room list
+    // here would recompose the whole layer on every list publication (~10/s
+    // while the list is working). The StateFlow replays its current value, so
+    // resolve latency is unchanged, and this coroutine now completes.
+    LaunchedEffect(roomId) {
+        if (timelineVm != null) return@LaunchedEffect
+        timelineVm = scope.roomList.rooms.map { scope.timeline(roomId) }.filterNotNull().first()
     }
 
     val viewModel = timelineVm
     if (viewModel == null) {
-        Box(
-            Modifier.fillMaxSize().background(colors.bgApp),
-            contentAlignment = Alignment.Center,
+        // A room left/kicked elsewhere never resolves (the restored selection
+        // outlives it), so keep a back chevron and eventually say so instead
+        // of spinning forever with no chrome.
+        var wearyOfWaiting by remember(roomId) { mutableStateOf(false) }
+        LaunchedEffect(roomId) {
+            delay(30_000)
+            wearyOfWaiting = true
+        }
+        Column(
+            Modifier
+                .fillMaxSize()
+                .background(colors.bgApp)
+                .statusBarsPadding(),
         ) {
-            CircularProgressIndicator(color = colors.textSecondary)
+            TopAppBar(
+                title = {},
+                navigationIcon = {
+                    IconButton(onClick = closeChat) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack,
+                             contentDescription = "Back", tint = colors.textPrimary)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.bgApp),
+            )
+            Box(
+                Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (wearyOfWaiting) {
+                    Text(
+                        "This conversation isn't available right now.",
+                        color = colors.textSecondary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 32.dp),
+                    )
+                } else {
+                    CircularProgressIndicator(color = colors.textSecondary)
+                }
+            }
         }
         return
     }
@@ -121,6 +175,10 @@ fun RoomTimelineLayer(
         },
     )
 
+    // TimelineMediaRenderers has no equals, so rebuilding it per recomposition
+    // recomposes every visible MessageRow's subtree.
+    val renderers = remember(scope, appState, viewModel) { mediaRenderers(viewModel) }
+
     val videoRoomIds by scope.roomList.videoRoomIds.collectAsStateWithLifecycle()
 
     var threadTarget by remember(roomId) { mutableStateOf<ThreadTarget?>(null) }
@@ -135,7 +193,7 @@ fun RoomTimelineLayer(
         appState = appState,
         closeChat = closeChat,
         emoteLoader = emoteLoader,
-        mediaRenderers = mediaRenderers(viewModel),
+        mediaRenderers = renderers,
         videoRoomIds = videoRoomIds,
         onStartCall = onStartCall,
         onOpenSearch = { showsRoomSearch = true },
@@ -176,6 +234,8 @@ fun RoomTimelineLayer(
             val canRedactOther by threadVm.canRedactOther.collectAsStateWithLifecycle()
             val ownDisplayName by scope.ownDisplayName.collectAsStateWithLifecycle()
             val ownAvatarUrl by scope.ownAvatarUrl.collectAsStateWithLifecycle()
+            // Hoisted out of entryRow, which runs per LazyColumn item.
+            val threadRenderers = remember(scope, appState, threadVm) { mediaRenderers(threadVm) }
 
             ThreadScreen(
                 viewModel = threadVm,
@@ -194,7 +254,7 @@ fun RoomTimelineLayer(
                             ownDisplayName = ownDisplayName,
                             ownAvatarUrl = ownAvatarUrl,
                             emoteLoader = emoteLoader,
-                            mediaRenderers = mediaRenderers(threadVm),
+                            mediaRenderers = threadRenderers,
                             // Thread rows don't nest further (iOS `{ _ in }`).
                             openThread = {},
                             openProfile = { profileTarget = it },

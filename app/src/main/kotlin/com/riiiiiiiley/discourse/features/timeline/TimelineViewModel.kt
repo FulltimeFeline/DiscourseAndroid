@@ -59,6 +59,7 @@ import org.matrix.rustcomponents.sdk.RoomInfoListener
 import org.matrix.rustcomponents.sdk.RoomMessageEventContentWithoutRelation
 import org.matrix.rustcomponents.sdk.RoomMessageEventMessageType
 import org.matrix.rustcomponents.sdk.StateEventType
+import org.matrix.rustcomponents.sdk.TaskHandle
 import org.matrix.rustcomponents.sdk.ThumbnailInfo
 import org.matrix.rustcomponents.sdk.Timeline
 import org.matrix.rustcomponents.sdk.TimelineConfiguration
@@ -220,7 +221,7 @@ class TimelineViewModel(
      * optimistically, so these are flushed in order once it exists.
      */
     private sealed class QueuedOutbound {
-        data class Text(val text: String) : QueuedOutbound()
+        data class Text(val text: String, val useComposerTargets: Boolean = true) : QueuedOutbound()
         data class Attachment(val attachment: PendingAttachment, val inReplyTo: String?) :
             QueuedOutbound()
     }
@@ -290,7 +291,7 @@ class TimelineViewModel(
         streamJob = null
         ephemeralSyncJob?.cancel()
         ephemeralSyncJob = null
-        timelineListenerRetained = emptyList()
+        detachTimelineListener()
         parkedListenerDetached = true
         // Keep the scroll anchor's row plus a tail of recent context.
         val keepTail = 200
@@ -459,7 +460,8 @@ class TimelineViewModel(
      * The diff listener's bridge + handle, kept apart from `retained` so
      * parking can detach and re-attach just this listener.
      */
-    private var timelineListenerRetained: List<Any> = emptyList()
+    private var timelineListenerBridge: DiffBridge? = null
+    private var timelineListenerHandle: TaskHandle? = null
     private var streamJob: Job? = null
     private var streamJob2: Job? = null
     private var typingStreamJob: Job? = null
@@ -478,10 +480,6 @@ class TimelineViewModel(
      */
     private var lastMarkedReadEventId: String? = null
     private var lastMarkedReadAt: Long? = null
-
-    init {
-        TimelineEntry.currentOwnUserId = ownUserId
-    }
 
     /** A view model for the thread rooted at the given event. */
     fun threadViewModel(rootEventId: String): TimelineViewModel =
@@ -769,6 +767,31 @@ class TimelineViewModel(
     }
 
     /**
+     * Cancels the Rust-side diff subscription. Dropping the handle alone
+     * leaves Rust invoking `onUpdate` into an undrained UNLIMITED channel, so
+     * FFI item handles pile up until a GC lets the uniffi cleaner abort it.
+     */
+    private fun detachTimelineListener() {
+        val bridge = timelineListenerBridge
+        val handle = timelineListenerHandle
+        timelineListenerBridge = null
+        timelineListenerHandle = null
+        // Close (not cancel): a batch already queued stays deliverable to a
+        // drain job that hasn't stopped yet.
+        bridge?.channel?.close()
+        // cancel()/destroy() are blocking UniFFI calls. This runs from the
+        // isParked setter and from SessionScope's evict-all loop, both on Main,
+        // so doing them inline stalled every chat open. The handle is already
+        // detached above, so a concurrent re-attach builds its own.
+        handle?.let { h ->
+            teardownScope.launch {
+                runCatching { h.cancel() }
+                runCatching { h.destroy() }
+            }
+        }
+    }
+
+    /**
      * Subscribes the diff bridge (the SDK replays the item list as an initial
      * reset). Shared by `start()` and the unpark resync.
      */
@@ -776,9 +799,11 @@ class TimelineViewModel(
         // Replacing the listener must also stop the old drain job, or it
         // leaks suspended on a dropped bridge's channel.
         streamJob?.cancel()
+        detachTimelineListener()
         val bridge = DiffBridge()
         val handle = timeline.addListener(bridge)
-        timelineListenerRetained = listOf(bridge, handle)
+        timelineListenerBridge = bridge
+        timelineListenerHandle = handle
         streamJob = scope.launch {
             for (diffs in bridge.channel) {
                 // Cancellation-only: a batch racing parkTimeline's cancel must
@@ -804,7 +829,8 @@ class TimelineViewModel(
     private suspend fun flushOutboundQueue() {
         while (timeline != null && outboundQueue.isNotEmpty()) {
             when (val queued = outboundQueue.removeAt(0)) {
-                is QueuedOutbound.Text -> sendText(queued.text)
+                is QueuedOutbound.Text ->
+                    sendText(queued.text, useComposerTargets = queued.useComposerTargets)
                 is QueuedOutbound.Attachment ->
                     sendAttachmentData(queued.attachment, inReplyTo = queued.inReplyTo)
             }
@@ -812,6 +838,10 @@ class TimelineViewModel(
     }
 
     fun stop() {
+        // A dismissal racing start() must kill the in-flight performStart, or it
+        // resumes after this and attaches a listener + streamJob to a dead VM.
+        startJob?.cancel()
+        startJob = null
         audioPlayback.stopAll()
         mediaVM?.stop()
         mediaVM = null
@@ -828,7 +858,7 @@ class TimelineViewModel(
         ephemeralSyncJob?.cancel()
         ephemeralSyncJob = null
         retained = mutableListOf()
-        timelineListenerRetained = emptyList()
+        detachTimelineListener()
         parkedListenerDetached = false
         timeline = null
     }
@@ -837,11 +867,20 @@ class TimelineViewModel(
 
     fun hasPendingAttachments(): Boolean = _pendingAttachments.value.isNotEmpty()
 
-    suspend fun sendText(text: String, mentions: List<MentionRef> = emptyList()) {
+    /**
+     * `useComposerTargets = false` sends the text as a plain new message even
+     * with an edit/reply pending — a retry must not be retargeted at whatever
+     * the composer happens to be pointing at.
+     */
+    suspend fun sendText(
+        text: String,
+        mentions: List<MentionRef> = emptyList(),
+        useComposerTargets: Boolean = true,
+    ) {
         val timeline = this.timeline
         if (timeline == null) {
             // Composer already cleared its field; flush in order once start() has a timeline.
-            outboundQueue.add(QueuedOutbound.Text(text))
+            outboundQueue.add(QueuedOutbound.Text(text, useComposerTargets))
             return
         }
         // Mentions and custom emoji both need an HTML formatted body; plain
@@ -861,19 +900,35 @@ class TimelineViewModel(
             content = messageEventContentFromMarkdown(md = text)
         }
         sendTypingNotice(false)
-        val edit = editTarget.value
-        val reply = replyTarget.value
+        val edit = if (useComposerTargets) editTarget.value else null
+        val reply = if (useComposerTargets) replyTarget.value else null
         if (edit?.eventId != null) {
             editTarget.value = null
-            runCatching {
+            try {
                 timeline.edit(EventOrTransactionId.EventId(edit.eventId),
                               EditedContent.RoomMessage(content = content))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                presentComposerError("Couldn't edit that message")
             }
         } else if (reply?.eventId != null) {
             replyTarget.value = null
-            runCatching { timeline.sendReply(content, reply.eventId) }
+            try {
+                timeline.sendReply(content, reply.eventId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                presentComposerError("Couldn't send your reply")
+            }
         } else {
-            runCatching { timeline.send(content) }
+            try {
+                timeline.send(content)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                presentComposerError("Couldn't send your message")
+            }
         }
     }
 
@@ -1248,7 +1303,7 @@ class TimelineViewModel(
             message.ffiItemId?.let { itemId ->
                 runCatching { timeline?.redactEvent(itemId, null) }
             }
-            sendText(body)
+            sendText(body, useComposerTargets = false)
         }
     }
 
@@ -1806,12 +1861,14 @@ class TimelineViewModel(
 
     /** Runs the FFI-heavy `TimelineEntry.from` map off-main for one diff. */
     private fun materializeDiff(diff: TimelineDiff): MappedDiff = when (diff) {
-        is TimelineDiff.Append -> MappedDiff(values = diff.values.map { TimelineEntry.from(it) })
-        is TimelineDiff.PushFront -> MappedDiff(value = TimelineEntry.from(diff.value))
-        is TimelineDiff.PushBack -> MappedDiff(value = TimelineEntry.from(diff.value))
-        is TimelineDiff.Insert -> MappedDiff(value = TimelineEntry.from(diff.value))
-        is TimelineDiff.Set -> MappedDiff(value = TimelineEntry.from(diff.value))
-        is TimelineDiff.Reset -> MappedDiff(values = diff.values.map { TimelineEntry.from(it) })
+        is TimelineDiff.Append ->
+            MappedDiff(values = diff.values.map { TimelineEntry.from(it, ownUserId) })
+        is TimelineDiff.PushFront -> MappedDiff(value = TimelineEntry.from(diff.value, ownUserId))
+        is TimelineDiff.PushBack -> MappedDiff(value = TimelineEntry.from(diff.value, ownUserId))
+        is TimelineDiff.Insert -> MappedDiff(value = TimelineEntry.from(diff.value, ownUserId))
+        is TimelineDiff.Set -> MappedDiff(value = TimelineEntry.from(diff.value, ownUserId))
+        is TimelineDiff.Reset ->
+            MappedDiff(values = diff.values.map { TimelineEntry.from(it, ownUserId) })
         else -> MappedDiff()
     }
 
@@ -2018,6 +2075,14 @@ class TimelineViewModel(
     }
 
     companion object {
+        /**
+         * Listener teardown outlives the view model that owned the handle: an
+         * evicted view model still has to release its Rust subscription, and
+         * `scope` is Main.immediate. Process-lifetime and never cancelled, so a
+         * detach can never be dropped on the floor.
+         */
+        private val teardownScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
         private fun htmlEscape(s: String): String = s
             .replace("&", "&amp;")
             .replace("<", "&lt;")

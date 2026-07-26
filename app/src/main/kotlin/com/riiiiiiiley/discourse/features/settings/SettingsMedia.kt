@@ -1,7 +1,11 @@
 package com.riiiiiiiley.discourse.features.settings
 
+import android.content.Intent
+import android.provider.Settings
 import android.text.format.Formatter
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,9 +15,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +37,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.riiiiiiiley.discourse.app.AppState
 import com.riiiiiiiley.discourse.core.NotificationPreview
@@ -55,7 +67,57 @@ fun NotificationSettingsScreen(appState: AppState, onBack: () -> Unit) {
     // user), so bump a local version to re-read it after each toggle.
     var notificationTogglesVersion by remember { mutableStateOf(0) }
 
+    // A denied POST_NOTIFICATIONS prompt silences everything below, so say so
+    // and offer the way out. Re-read on resume: the user fixes it in system
+    // settings and comes straight back here.
+    val context = LocalContext.current
+    var notificationsBlocked by remember {
+        mutableStateOf(!NotificationManagerCompat.from(context).areNotificationsEnabled())
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notificationsBlocked =
+                    !NotificationManagerCompat.from(context).areNotificationsEnabled()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     SettingsScaffold(title = "Notifications", onBack = onBack) {
+        if (notificationsBlocked) {
+            // iOS semantic .orange.
+            val orange = Color(0xFFFF9500)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        // Some ROMs have no handler for this action.
+                        runCatching {
+                            context.startActivity(
+                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+                            )
+                        }
+                    }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Outlined.Warning, contentDescription = null,
+                     tint = orange, modifier = Modifier.size(18.dp))
+                Text(
+                    "Notifications are turned off for Discourse. Tap to enable them in " +
+                        "system settings.",
+                    color = orange,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+
         SettingsSection(
             header = "Show in Notifications",
             footer = "Sender and Message shows who wrote and a preview of the text. " +

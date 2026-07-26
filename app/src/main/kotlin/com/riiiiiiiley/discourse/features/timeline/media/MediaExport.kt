@@ -57,19 +57,23 @@ object MediaExport {
             }.getOrNull()
         }
 
-    /** Temp-file → system share sheet, the ACTION_SEND analogue of iOS ShareLink. */
-    suspend fun share(context: Context, data: ByteArray, filename: String) {
-        val uri = temporaryFileUri(context, data, filename) ?: return
+    /**
+     * Temp-file → system share sheet, the ACTION_SEND analogue of iOS
+     * ShareLink. Returns whether the chooser was launched (not whether the
+     * user went through with it).
+     */
+    suspend fun share(context: Context, data: ByteArray, filename: String): Boolean {
+        val uri = temporaryFileUri(context, data, filename) ?: return false
         val send = Intent(Intent.ACTION_SEND).apply {
             type = mimeType(filename, data)
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        runCatching {
+        return runCatching {
             context.startActivity(Intent.createChooser(send, null).apply {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             })
-        }
+        }.isSuccess
     }
 
     /**

@@ -29,13 +29,6 @@ sealed class TimelineEntry {
 
     companion object {
         /**
-         * The signed-in user, for marking own poll votes. Written only from
-         * the main thread, before mapping.
-         */
-        @Volatile
-        var currentOwnUserId: String = ""
-
-        /**
          * Strips the Matrix reply fallback — the leading `> <@user> …` quoted
          * lines and their trailing blank separator — from a reply's body. The
          * reply preview renders the quoted message instead, so keeping the

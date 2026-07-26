@@ -24,11 +24,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Root state machine: launching → loggedOut → active(session).
- * All mutations run on the main dispatcher (the Kotlin analogue of the iOS
- * @MainActor isolation).
+ * State mutations run on the main dispatcher (the Kotlin analogue of the iOS
+ * @MainActor isolation), with the exception of the `scopes` map, which is also
+ * written from IO — see its doc comment.
  */
 class AppState(context: Context) {
 
@@ -203,8 +205,14 @@ class AppState(context: Context) {
         mainScope.launch { block() }
     }
 
-    /** Warm sessions, kept across account switches. Keyed by user ID. */
-    private val scopes = mutableMapOf<String, SessionScope>()
+    /**
+     * Warm sessions, kept across account switches. Keyed by user ID.
+     * Written by `activate`/`warmBackgroundAccounts` on IO and read from
+     * PushRegistrar's own IO scope (via [warmScopes]) as well as Main — so it
+     * must not be a plain HashMap, or the concurrent iteration throws
+     * ConcurrentModificationException and kills the process.
+     */
+    private val scopes = ConcurrentHashMap<String, SessionScope>()
 
     /** Every warm session (active + background), for multi-account push. */
     val warmScopes: List<SessionScope> get() = scopes.values.toList()

@@ -61,9 +61,9 @@ val MessageItem.ffiItemId: EventOrTransactionId?
  * Maps every SDK item to exactly one entry (never drops items) so the
  * array stays index-aligned with the diff stream.
  */
-fun TimelineEntry.Companion.from(item: TimelineItem): TimelineEntry {
+fun TimelineEntry.Companion.from(item: TimelineItem, ownUserId: String): TimelineEntry {
     val uid = item.uniqueId().id
-    item.asEvent()?.let { return fromEvent(uid, it) }
+    item.asEvent()?.let { return fromEvent(uid, it, ownUserId) }
     return when (val virtualItem = item.asVirtual()) {
         is VirtualTimelineItem.DateDivider ->
             TimelineEntry.DayDivider(id = uid, date = virtualItem.ts.toLong())
@@ -73,7 +73,7 @@ fun TimelineEntry.Companion.from(item: TimelineItem): TimelineEntry {
     }
 }
 
-private fun fromEvent(uid: String, event: EventTimelineItem): TimelineEntry {
+private fun fromEvent(uid: String, event: EventTimelineItem, ownUserId: String): TimelineEntry {
     var senderName: String? = null
     var senderAvatar: String? = null
     (event.senderProfile as? ProfileDetails.Ready)?.let {
@@ -110,7 +110,7 @@ private fun fromEvent(uid: String, event: EventTimelineItem): TimelineEntry {
                 replyPreview = msgLike.inReplyTo?.let { replyPreview(it) },
                 isOwn = event.isOwn,
                 timestamp = event.timestamp.toLong(),
-                kind = kindOf(msgLike),
+                kind = kindOf(msgLike, ownUserId),
                 isEdited = isEdited(msgLike),
                 reactions = msgLike.reactions.map { reaction ->
                     MessageReaction(key = reaction.key,
@@ -121,7 +121,7 @@ private fun fromEvent(uid: String, event: EventTimelineItem): TimelineEntry {
                 sendState = sendState,
                 canBeRepliedTo = event.canBeRepliedTo,
                 readReceiptUserIds = event.readReceipts.keys
-                    .filter { it != TimelineEntry.currentOwnUserId }
+                    .filter { it != ownUserId }
                     .sorted(),
                 shieldProvider = ShieldProviderBox(provider = event.lazyProvider, itemId = uid),
             ))
@@ -215,7 +215,7 @@ private fun replyPreview(details: InReplyToDetails): MessageItem.ReplyPreview {
     }
 }
 
-private fun kindOf(msgLike: MsgLikeContent): MessageItem.Kind = when (val kind = msgLike.kind) {
+private fun kindOf(msgLike: MsgLikeContent, ownUserId: String): MessageItem.Kind = when (val kind = msgLike.kind) {
     is MsgLikeKind.Message -> when (val msgType = kind.content.msgType) {
         is MessageType.Text -> MessageItem.Kind.Text(
             TimelineEntry.strippedReplyFallback(msgType.content.body,
@@ -286,7 +286,7 @@ private fun kindOf(msgLike: MsgLikeContent): MessageItem.Kind = when (val kind =
             PollItem.Answer(id = answer.id,
                             text = answer.text,
                             voteCount = voters.size,
-                            votedByMe = voters.contains(TimelineEntry.currentOwnUserId))
+                            votedByMe = voters.contains(ownUserId))
         },
         maxSelections = kind.maxSelections.toInt(),
         isDisclosed = kind.kind == PollKind.DISCLOSED,

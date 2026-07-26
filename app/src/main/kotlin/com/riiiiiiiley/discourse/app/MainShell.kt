@@ -1,6 +1,7 @@
 package com.riiiiiiiley.discourse.app
 
 import android.content.Context
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
@@ -144,6 +145,10 @@ fun MainShell(appState: AppState, scope: SessionScope) {
     var showsVerification by remember { mutableStateOf(false) }
     /** 0 = room list, 1 = chat fully on screen; tracks the finger mid-swipe. */
     val chatProgress = remember { Animatable(0f) }
+    // System-back state for the chat layer. Set only at the settle points, and
+    // deliberately NOT rememberSaveable: chatProgress isn't saveable, so a
+    // restored `true` would leave back a silent no-op over the room list.
+    var chatOpen by remember { mutableStateOf(false) }
     var showsPhoneCall by remember(scope.userId) { mutableStateOf(false) }
 
     // MARK: Per-space room-selection memory (iOS @AppStorage roomSelectionBySpace)
@@ -184,6 +189,7 @@ fun MainShell(appState: AppState, scope: SessionScope) {
             appState.activeCallRoomIds.value.contains(current)) {
             return
         }
+        chatOpen = true
         // Opening a room always lands on the Chat tab.
         phoneTab = PhoneTab.CHAT
         if (pushedRoomId != roomId) pushedRoomId = roomId
@@ -202,6 +208,7 @@ fun MainShell(appState: AppState, scope: SessionScope) {
      * swiping back reveals it as left.
      */
     fun closeChat() {
+        chatOpen = false
         keyboard?.hide()
         focusManager.clearFocus()
         pushedRoomId?.let { id ->
@@ -363,6 +370,13 @@ fun MainShell(appState: AppState, scope: SessionScope) {
     // pan wins only once horizontal slop is exceeded. A sibling overlay would
     // instead block all touches underneath.
     var panWidthPx by remember { mutableStateOf(1f) }
+
+    // Declared before the content so the nested handlers (settings, composer,
+    // call) stay at higher priority: system back unwinds the innermost thing
+    // first, and only falls through to here.
+    BackHandler(enabled = chatOpen) { closeChat() }
+    BackHandler(enabled = phoneTab == PhoneTab.SETTINGS) { phoneTab = PhoneTab.CHAT }
+
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
@@ -392,6 +406,7 @@ fun MainShell(appState: AppState, scope: SessionScope) {
                         val predicted =
                             panBase - (totalDrag + velocity * 0.18f) / panWidthPx
                         if (predicted > 0.5f) {
+                            chatOpen = true
                             pushedRoomId?.let { id ->
                                 val vm = scope.timeline(id)
                                 vm?.isParked = false
@@ -402,6 +417,7 @@ fun MainShell(appState: AppState, scope: SessionScope) {
                                 chatProgress.animateTo(1f, pagerSettle())
                             }
                         } else {
+                            chatOpen = false
                             keyboard?.hide()
                             pushedRoomId?.let { id ->
                                 scope.timeline(id)?.let { vm ->

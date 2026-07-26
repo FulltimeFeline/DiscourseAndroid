@@ -160,12 +160,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.riiiiiiiley.discourse.core.CustomEmojiStore
 import com.riiiiiiiley.discourse.core.Preferences
 import com.riiiiiiiley.discourse.core.SessionScope
+import com.riiiiiiiley.discourse.features.roomlist.RoomAvatarView
 import com.riiiiiiiley.discourse.features.stickers.StickerPickerView
 import com.riiiiiiiley.discourse.features.timeline.media.WaveformBars
 import com.riiiiiiiley.discourse.models.MentionRef
 import com.riiiiiiiley.discourse.models.MessageItem
 import com.riiiiiiiley.discourse.models.RoomSummary
-import com.riiiiiiiley.discourse.ui.components.RoomAvatarView
 import com.riiiiiiiley.discourse.ui.theme.LocalDiscourseColors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow

@@ -102,6 +102,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -1598,7 +1599,13 @@ fun RoomAvatarView(
     }
 
     Box(
-        modifier.size(size).clip(CircleShape),
+        modifier
+            .size(size)
+            .clip(CircleShape)
+            // Decorative: the adjacent name carries the info. Without this the
+            // initials fallback is read by TalkBack as a stray fragment
+            // ("A B" before every room name).
+            .clearAndSetSemantics {},
         contentAlignment = Alignment.Center,
     ) {
         val bitmap = image

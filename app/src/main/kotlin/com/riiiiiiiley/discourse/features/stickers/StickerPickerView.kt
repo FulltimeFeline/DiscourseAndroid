@@ -230,6 +230,17 @@ fun StickerPickerView(
     }
 
     val gridState = rememberLazyGridState()
+    // A new query rebuilds `cells`, but the grid restores position by key: the
+    // previously-visible key is gone, so the stored index survives and measure
+    // clamps it to the tail of the match list. Guarded on the first
+    // composition so a rotation's restored position isn't wiped.
+    var lastQuery by remember { mutableStateOf(trimmedQuery) }
+    LaunchedEffect(trimmedQuery) {
+        if (trimmedQuery != lastQuery) {
+            lastQuery = trimmedQuery
+            gridState.scrollToItem(0)
+        }
+    }
     /** The pack whose header most recently crossed the top. */
     val derivedPack by remember(cells) {
         derivedStateOf {

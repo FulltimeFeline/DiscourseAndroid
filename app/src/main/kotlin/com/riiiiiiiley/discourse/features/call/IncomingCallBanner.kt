@@ -31,7 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.riiiiiiiley.discourse.app.AppState
 import com.riiiiiiiley.discourse.core.RingtonePlayer
-import com.riiiiiiiley.discourse.ui.components.RoomAvatarView
+import com.riiiiiiiley.discourse.features.roomlist.RoomAvatarView
 import com.riiiiiiiley.discourse.ui.theme.LocalDiscourseColors
 import kotlinx.coroutines.delay
 

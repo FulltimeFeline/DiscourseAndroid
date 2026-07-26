@@ -46,9 +46,9 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.riiiiiiiley.discourse.features.roomlist.RoomAvatarView
 import com.riiiiiiiley.discourse.features.search.NoResultsView
 import com.riiiiiiiley.discourse.models.RoomSummary
-import com.riiiiiiiley.discourse.ui.components.RoomAvatarView
 import com.riiiiiiiley.discourse.ui.theme.LocalDiscourseColors
 import kotlin.math.max
 import kotlin.math.min

@@ -1,18 +1,15 @@
 package com.riiiiiiiley.discourse.core
 
-import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.RemoteInput
-import androidx.core.content.ContextCompat
 import com.riiiiiiiley.discourse.models.RoomSummary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -124,8 +121,14 @@ object NotificationManager {
             when (action) {
                 is PendingAction.Reply -> {
                     val handler = sendReply
-                    if (handler != null) handler(action.roomId, action.text, action.accountUserId)
-                    else pendingActions.add(action)
+                    if (handler != null) {
+                        handler(action.roomId, action.text, action.accountUserId)
+                        // Retire the "Not sent yet — open Discourse to send"
+                        // banner handleIntent posted; it is being sent now.
+                        clearDelivered(action.roomId)
+                    } else {
+                        pendingActions.add(action)
+                    }
                 }
                 is PendingAction.MarkRead -> {
                     val handler = markRoomRead
@@ -160,12 +163,29 @@ object NotificationManager {
     private val lastCallActive = mutableMapOf<String, Boolean>()
     private val invitesNotified = mutableSetOf<String>()
 
+    /**
+     * Cached [isAuthorized]. `areNotificationsEnabled()` is a binder round-trip
+     * (unlike the checkSelfPermission it replaced, which the platform caches
+     * in-process), and the room-list flush asks twice per changed room every
+     * 100ms on the main thread — hundreds of IPCs during initial sync. A few
+     * seconds of staleness is invisible; the settings screen reads the live
+     * value itself.
+     */
+    private var authorizedCache: Boolean? = null
+    private var authorizedCacheAt = 0L
+
     private val isAuthorized: Boolean
         get() {
             val context = appContext ?: return false
-            if (android.os.Build.VERSION.SDK_INT < 33) return true
-            return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
-                PackageManager.PERMISSION_GRANTED
+            val now = android.os.SystemClock.elapsedRealtime()
+            authorizedCache?.let { if (now - authorizedCacheAt < 5_000) return it }
+            // areNotificationsEnabled covers both the runtime permission and a
+            // later toggle-off in system settings, so the internal gate matches
+            // what the OS would actually show.
+            val enabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+            authorizedCache = enabled
+            authorizedCacheAt = now
+            return enabled
         }
 
     /** Creates the channels; the POST_NOTIFICATIONS prompt is the activity's. */
@@ -462,8 +482,18 @@ object NotificationManager {
     /**
      * Routes a notification intent (activity tap or receiver action) into the
      * wired handlers; queues it if the session hasn't wired them yet.
+     *
+     * [context] is the receiver's: a cold FCM/action process never ran
+     * `activate`, so without it `appContext` is null and everything below —
+     * including the banner updates — is a silent no-op.
      */
-    fun handleIntent(intent: Intent) {
+    fun handleIntent(intent: Intent, context: Context? = null) {
+        if (appContext == null && context != null) {
+            appContext = context.applicationContext
+            // Cold action process: activate() never ran, so the replacement
+            // banner below would be dropped for want of a channel.
+            runCatching { ensureChannels(context) }
+        }
         val action = intent.getStringExtra(EXTRA_ACTION) ?: return
         val roomId = intent.getStringExtra(EXTRA_ROOM_ID) ?: return
         val eventId = intent.getStringExtra(EXTRA_EVENT_ID)
@@ -474,10 +504,28 @@ object NotificationManager {
                     ?.getCharSequence(REMOTE_INPUT_KEY)?.toString()?.trim().orEmpty()
                 if (text.isEmpty()) return
                 val handler = sendReply
-                if (handler != null) handler(roomId, text, accountUserId)
-                else pendingActions.add(PendingAction.Reply(roomId, text, accountUserId))
-                // The banner was actioned; retire it.
-                clearDelivered(roomId)
+                if (handler != null) {
+                    handler(roomId, text, accountUserId)
+                    // The banner was actioned; retire it.
+                    clearDelivered(roomId)
+                } else {
+                    // No UI ever ran, so this only reaches the homeserver once
+                    // the app is opened — say so instead of dismissing the
+                    // banner and losing the text silently. Replacing the
+                    // actioned banner also retires its "sending" spinner.
+                    pendingActions.add(PendingAction.Reply(roomId, text, accountUserId))
+                    clearDelivered(roomId)
+                    deliver(
+                        tag = roomId,
+                        roomId = roomId,
+                        accountUserId = accountUserId.orEmpty(),
+                        title = "Discourse",
+                        subtitle = null,
+                        body = "Not sent yet — open Discourse to send: $text",
+                        avatarUrl = null,
+                        withActions = false,
+                    )
+                }
             }
             ACTION_MARK_READ -> {
                 val handler = markRoomRead
@@ -497,6 +545,6 @@ object NotificationManager {
 /** Reply / mark-as-read notification actions land here (manifest receiver). */
 class NotificationActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        NotificationManager.handleIntent(intent)
+        NotificationManager.handleIntent(intent, context)
     }
 }
