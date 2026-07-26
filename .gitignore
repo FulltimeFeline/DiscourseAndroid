@@ -28,3 +28,6 @@ keystore.properties
 
 # Firebase config (contains project API key)
 google-services.json
+
+# Release build output
+/app/release
